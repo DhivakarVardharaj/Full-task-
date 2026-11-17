@@ -1,0 +1,35 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+*.tfstate.backup
+crash.log
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Build output
+dist/
+build/
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+
+# Old deployment files not used in this project workflow
+/argocd/
+/helm/
+/jenkins/
+/kubernetes/
+/monitoring/
+/vault/
+/Jenkinsfile
