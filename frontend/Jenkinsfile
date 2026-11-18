@@ -9,12 +9,14 @@ pipeline {
     environment {
         AWS_DEFAULT_REGION = 'ap-south-1'
 
-        AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
+        AWS_ACCESS_KEY_ID = credentials('aws-access-key-id')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
 
-        IMAGE_NAME = 'smart-task-frontend'
+        S3_BUCKET = 'smart-task-frontend-960328031069'
 
-        TF_IN_AUTOMATION = 'true'
+        CLOUDFRONT_ID = 'E2Y4RT58XD0A6J'
+
+        WEBSITE_URL = 'https://dpx4o2gj4f8uy.cloudfront.net'
     }
 
     stages {
@@ -22,7 +24,6 @@ pipeline {
         stage('Checkout') {
             steps {
                 echo 'Checking out Smart Task Management System'
-
                 checkout scm
             }
         }
@@ -34,7 +35,6 @@ pipeline {
                 }
             }
         }
-
 
         stage('Frontend Tests') {
             steps {
@@ -50,7 +50,6 @@ pipeline {
             }
         }
 
-
         stage('Build React Application') {
             steps {
                 dir('frontend') {
@@ -59,22 +58,15 @@ pipeline {
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Verify Build') {
             steps {
                 dir('frontend') {
                     sh '''
-                        docker build \
-                        -t ${IMAGE_NAME}:${BUILD_NUMBER} \
-                        -t ${IMAGE_NAME}:latest .
+                        test -f dist/index.html
+                        echo "Frontend production build verified."
+                        ls -lh dist/
                     '''
                 }
-            }
-        }
-
-
-        stage('Verify Docker Image') {
-            steps {
-                sh 'docker images ${IMAGE_NAME}'
             }
         }
 
@@ -82,105 +74,41 @@ pipeline {
             steps {
                 sh '''
                     aws sts get-caller-identity
-                    aws configure get region || true
                 '''
             }
         }
 
-        stage('Terraform Init') {
-            steps {
-                dir('terraform') {
-                    sh 'terraform init'
-                }
-            }
-        }
-
-
-        stage('Terraform Validate') {
-            steps {
-                dir('terraform') {
-                    sh 'terraform validate'
-                }
-            }
-        }
-
-        stage('Terraform Plan') {
-            steps {
-                dir('terraform') {
-                    sh 'terraform plan -out=tfplan'
-                }
-            }
-        }
-
-        stage('Manual Approval') {
-            steps {
-                timeout(time: 15, unit: 'MINUTES') {
-                    input message: 'Approve creation/update of AWS frontend infrastructure?',
-                          ok: 'Approve Deployment'
-                }
-            }
-        }
-
-        stage('Terraform Apply') {
-            steps {
-                dir('terraform') {
-                    sh 'terraform apply -auto-approve tfplan'
-                }
-            }
-        }
-
-
-        stage('Get Deployment Details') {
-            steps {
-                dir('terraform') {
-                    script {
-                        env.S3_BUCKET = sh(
-                            script: 'terraform output -raw s3_bucket_name',
-                            returnStdout: true
-                        ).trim()
-
-                        env.CLOUDFRONT_ID = sh(
-                            script: 'terraform output -raw cloudfront_distribution_id',
-                            returnStdout: true
-                        ).trim()
-
-                        env.WEBSITE_URL = sh(
-                            script: 'terraform output -raw cloudfront_website_url',
-                            returnStdout: true
-                        ).trim()
-                    }
-                }
-
-                echo "S3 Bucket: ${env.S3_BUCKET}"
-                echo "CloudFront URL: ${env.WEBSITE_URL}"
-            }
-        }
-
-
-        stage('Deploy Frontend to S3') {
+        stage('Deploy Frontend to Existing S3') {
             steps {
                 dir('frontend') {
                     sh '''
+                        echo "Deploying frontend to existing S3 bucket..."
+
                         aws s3 sync dist/ s3://${S3_BUCKET}/ \
-                        --delete \
-                        --cache-control "public,max-age=31536000,immutable" \
-                        --exclude "index.html"
+                            --delete \
+                            --cache-control "public,max-age=31536000,immutable" \
+                            --exclude "index.html"
 
                         aws s3 cp dist/index.html s3://${S3_BUCKET}/index.html \
-                        --cache-control "no-cache,no-store,must-revalidate" \
-                        --content-type "text/html"
+                            --cache-control "no-cache,no-store,must-revalidate" \
+                            --content-type "text/html"
+
+                        echo "Frontend uploaded successfully."
                     '''
                 }
             }
         }
 
-
-        stage('CloudFront Invalidation') {
+        stage('CloudFront Cache Invalidation') {
             steps {
                 sh '''
+                    echo "Invalidating existing CloudFront distribution..."
+
                     aws cloudfront create-invalidation \
-                    --distribution-id ${CLOUDFRONT_ID} \
-                    --paths "/*"
+                        --distribution-id ${CLOUDFRONT_ID} \
+                        --paths "/*"
+
+                    echo "CloudFront invalidation requested."
                 '''
             }
         }
@@ -192,6 +120,7 @@ pipeline {
                 echo '========================================'
                 echo "Website URL: ${env.WEBSITE_URL}"
                 echo "S3 Bucket: ${env.S3_BUCKET}"
+                echo "CloudFront ID: ${env.CLOUDFRONT_ID}"
                 echo '========================================'
             }
         }
@@ -199,11 +128,11 @@ pipeline {
 
     post {
         success {
-            echo 'Smart Task Management frontend pipeline completed successfully!'
+            echo 'Smart Task Management frontend deployment completed successfully!'
         }
 
         failure {
-            echo 'Frontend pipeline failed. Check Jenkins Console Output.'
+            echo 'Frontend deployment failed. Check Jenkins Console Output.'
         }
 
         always {
