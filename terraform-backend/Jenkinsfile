@@ -1,0 +1,283 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'SSH_ALLOWED_IP',
+            defaultValue: '',
+            description: 'Public IP allowed to SSH into EC2'
+        )
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        TF_IN_AUTOMATION = 'true'
+        DEPLOY_DIR = '/home/ubuntu/smart-task-deploy'
+    }
+
+    stages {
+
+       
+        stage('Checkout') {
+            steps {
+                checkout scm
+
+                echo 'GitHub repository checked out successfully.'
+            }
+        }
+
+        
+        stage('AWS Authentication') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        aws sts get-caller-identity
+                    '''
+                }
+            }
+        }
+
+        
+        stage('Terraform Init') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    dir('terraform-backend') {
+                        sh 'terraform init'
+                    }
+                }
+            }
+        }
+
+      
+        stage('Terraform Validate') {
+            steps {
+                dir('terraform-backend') {
+                    sh 'terraform validate'
+                }
+            }
+        }
+
+        
+        stage('Terraform Plan') {
+            steps {
+                script {
+                    if (!(params.SSH_ALLOWED_IP ==~ /(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/)) {
+                        error('Please provide a valid IPv4 address in SSH_ALLOWED_IP.')
+                    }
+                }
+
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    dir('terraform-backend') {
+                        sh '''
+                            terraform plan \
+                              -var="ssh_allowed_ip=${SSH_ALLOWED_IP}" \
+                              -out=tfplan
+                        '''
+                    }
+                }
+            }
+        }
+
+        
+        stage('Approve Infrastructure') {
+            steps {
+                input message: 'Review the Terraform plan. Approve creation of AWS EC2 and Security Group?', 
+                      ok: 'Approve and Create EC2'
+            }
+        }
+
+        
+        stage('Terraform Apply') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    dir('terraform-backend') {
+                        sh 'terraform apply -auto-approve tfplan'
+                    }
+                }
+            }
+        }
+
+        
+        stage('Get EC2 Public IP') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    script {
+                        dir('terraform-backend') {
+                            env.EC2_PUBLIC_IP = sh(
+                                script: 'terraform output -raw ec2_public_ip',
+                                returnStdout: true
+                            ).trim()
+                        }
+
+                        echo "Backend EC2 IP: ${env.EC2_PUBLIC_IP}"
+                    }
+                }
+            }
+        }
+
+        
+        stage('Build Backend Images') {
+            steps {
+                sh '''
+                    docker build -t smart-task/auth-service:latest \
+                      ./auth-service_1784011000189
+
+                    docker build -t smart-task/task-service:latest \
+                      ./task-service
+
+                    docker build -t smart-task/notification-service:latest \
+                      ./notification-service
+
+                    docker build -t smart-task/report-service:latest \
+                      ./report-service
+
+                    docker build -t smart-task/api-gateway:latest \
+                      ./api-gateway_1784010924579
+                '''
+            }
+        }
+
+        
+        stage('Package Docker Images') {
+            steps {
+                sh '''
+                    docker save -o backend-images.tar \
+                      smart-task/auth-service:latest \
+                      smart-task/task-service:latest \
+                      smart-task/notification-service:latest \
+                      smart-task/report-service:latest \
+                      smart-task/api-gateway:latest
+                '''
+            }
+        }
+
+        
+        stage('Transfer to EC2') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'smart-task-backend-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        mkdir -p ~/.ssh
+                        chmod 700 ~/.ssh
+
+                        for i in $(seq 1 30); do
+                            if ssh -i "$SSH_KEY" \
+                                -o StrictHostKeyChecking=accept-new \
+                                -o ConnectTimeout=5 \
+                                "$SSH_USER@$EC2_PUBLIC_IP" \
+                                "echo SSH connected"; then
+                                break
+                            fi
+
+                            echo "Waiting for EC2 SSH..."
+                            sleep 10
+                        done
+
+                        ssh -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=accept-new \
+                          "$SSH_USER@$EC2_PUBLIC_IP" \
+                          "mkdir -p $DEPLOY_DIR"
+
+                        scp -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=accept-new \
+                          backend-images.tar \
+                          "$SSH_USER@$EC2_PUBLIC_IP:$DEPLOY_DIR/"
+
+                        scp -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=accept-new \
+                          docker-compose.prod.yml \
+                          "$SSH_USER@$EC2_PUBLIC_IP:$DEPLOY_DIR/"
+                    '''
+                }
+            }
+        }
+
+        
+        stage('Deploy Backend') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'smart-task-backend-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    ),
+                    string(
+                        credentialsId: 'smart-task-jwt-secret',
+                        variable: 'JWT_SECRET'
+                    )
+                ]) {
+                    sh '''
+                        # Create secure environment file on EC2
+                        printf 'JWT_SECRET=%s\\n' "$JWT_SECRET" | \
+                        ssh -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=accept-new \
+                          "$SSH_USER@$EC2_PUBLIC_IP" \
+                          "umask 077; cat > $DEPLOY_DIR/.env"
+
+                        # Load images and start containers
+                        ssh -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=accept-new \
+                          "$SSH_USER@$EC2_PUBLIC_IP" \
+                          "cloud-init status --wait && \
+                           sudo docker load -i $DEPLOY_DIR/backend-images.tar && \
+                           cd $DEPLOY_DIR && \
+                           sudo docker compose \
+                             --env-file .env \
+                             -f docker-compose.prod.yml up -d"
+                    '''
+                }
+            }
+        }
+
+        
+        stage('Verify Deployment') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'smart-task-backend-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        ssh -i "$SSH_KEY" \
+                          -o StrictHostKeyChecking=accept-new \
+                          "$SSH_USER@$EC2_PUBLIC_IP" \
+                          "sudo docker ps"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Smart Task Backend deployed successfully!'
+            echo 'Backend API: http://${EC2_PUBLIC_IP}:5000'
+        }
+
+        failure {
+            echo 'Backend deployment failed. Check Jenkins Console Output.'
+        }
+    }
+}

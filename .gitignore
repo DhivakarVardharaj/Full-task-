@@ -33,3 +33,14 @@ Thumbs.db
 /monitoring/
 /vault/
 /Jenkinsfile
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.backup
+*.tfstate.backup
+*.swp
+
+# Deployment secrets
+.env
