@@ -3,44 +3,34 @@
 .env.*
 !.env.example
 
-# Terraform
-**/.terraform/*
+# Terraform local files and state
+**/.terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
 *.tfplan
-*.tfstate.backup
 crash.log
 
-# Node.js
+# Node.js dependencies
 node_modules/
 npm-debug.log*
 
 # Build output
 dist/
 build/
+coverage/
 
-# Operating system
+# Python virtual environments
+venv/
+.venv/
+
+# Private keys
+*.pem
+*.key
+
+# Operating system files
 .DS_Store
 Thumbs.db
 
-
-# Old deployment files not used in this project workflow
-/argocd/
-/helm/
-/jenkins/
-/kubernetes/
-/monitoring/
-/vault/
-/Jenkinsfile
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfplan
-*.tfplan.backup
-*.tfstate.backup
+# Temporary files
 *.swp
-
-# Deployment secrets
-.env
